@@ -101,15 +101,17 @@ const mainKeyboard = new Keyboard()
   .text('⚙️ Настроить расписание')
   .resized();
 
-// --- КОМАНДЫ И НАЖАТИЯ НИЖНИХ КНОПОК ---
+// --- ЕДИНСТВЕННАЯ КОМАНДА ДЛЯ СТАРТА ---
 
 bot.command('start', async (ctx) => {
   getUserData(ctx.chat.id);
   await ctx.reply(
-    '👋 Привет! Добро пожаловать в бота расписания.\n\nИспользуй кнопки внизу для навигации:',
+    '👋 Привет! Используй кнопки ниже для просмотра и настройки расписания:',
     { reply_markup: mainKeyboard }
   );
 });
+
+// --- ОБРАБОТКА НАЖАТИЙ НИЖНИХ КНОПОК ---
 
 bot.hears('📅 Сегодня', async (ctx) => {
   await ctx.reply(formatScheduleText(ctx.chat.id, new Date(), 'сегодня'), { parse_mode: 'Markdown' });
@@ -133,7 +135,7 @@ bot.hears('⚙️ Настроить расписание', async (ctx) => {
   });
 });
 
-// --- ИНЛАЙН НАВИГАЦИЯ И КНОПКИ ---
+// --- ИНЛАЙН НАВИГАЦИЯ И КНОПКИ РЕДАКТИРОВАНИЯ ---
 
 bot.callbackQuery(/^week_(even|odd)$/, async (ctx) => {
   const week = ctx.match[1];
@@ -211,7 +213,8 @@ bot.callbackQuery('clear_day', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// Обработка текстового ввода
+// --- ОБРАБОТКА ВВОДА ТЕКСТА (ПАРЫ И СМЕНЫ) ---
+
 bot.on('message:text', async (ctx) => {
   const chatId = ctx.chat.id;
 
@@ -252,7 +255,7 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// КРОН РАССЫЛКИ
+// --- КРОН РАССЫЛКИ ---
 
 cron.schedule('0 8 * * *', async () => {
   const data = loadData();
@@ -312,7 +315,7 @@ async function startBot() {
     await bot.api.deleteWebhook({ drop_pending_updates: true });
   } catch (e) {}
 
-  console.log('🤖 Бот успешно запущен!');
+  console.log('🤖 Бот запущен (управление только кнопками)!');
   await bot.start();
 }
 
