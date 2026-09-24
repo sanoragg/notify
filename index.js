@@ -1,12 +1,12 @@
 require('dotenv').config();
-const { Bot, InlineKeyboard, session } = require('grammy');
+const { Bot, InlineKeyboard, Keyboard, session } = require('grammy');
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
 
 const DATA_FILE = path.join(__dirname, 'schedule.json');
 
-// Загрузка / сохранение единой базы данных пользователей
+// Загрузка и сохранение данных
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
     const initial = {};
@@ -24,7 +24,6 @@ function saveData(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// Инициализация структуры для конкретного пользователя
 function getUserData(chatId) {
   const data = loadData();
   if (!data[chatId]) {
@@ -41,15 +40,6 @@ function getUserData(chatId) {
 }
 
 const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
-
-// Логирование входящих сообщений
-bot.use(async (ctx, next) => {
-  const incoming = ctx.message?.text || ctx.callbackQuery?.data;
-  if (incoming) {
-    console.log(`📩 [${new Date().toLocaleTimeString()}] Чат ${ctx.chat?.id}: ${incoming}`);
-  }
-  await next();
-});
 
 // Настройка сессий
 bot.use(session({
@@ -105,44 +95,46 @@ function formatScheduleText(chatId, targetDate = new Date(), titlePrefix = 'се
   return text;
 }
 
-// --- КОМАНДЫ ---
+// Постоянная нижняя клавиатура
+const mainKeyboard = new Keyboard()
+  .text('📅 Сегодня').text('📆 Завтра').row()
+  .text('⚙️ Настроить расписание')
+  .resized();
+
+// --- КОМАНДЫ И НАЖАТИЯ НИЖНИХ КНОПОК ---
 
 bot.command('start', async (ctx) => {
-  const chatId = ctx.chat.id;
-  getUserData(chatId); // Создает профиль и подписывает на рассылку
-
+  getUserData(ctx.chat.id);
   await ctx.reply(
-    '👋 Привет! Ты автоматически подписан на рассылку расписания!\n\n' +
-    'Доступные команды:\n' +
-    '/today — Расписание на сегодня\n' +
-    '/tomorrow — Расписание на завтра\n' +
-    '/edit — Настроить личное расписание'
+    '👋 Привет! Добро пожаловать в бота расписания.\n\nИспользуй кнопки внизу для навигации:',
+    { reply_markup: mainKeyboard }
   );
 });
 
-bot.command('today', async (ctx) => {
+bot.hears('📅 Сегодня', async (ctx) => {
   await ctx.reply(formatScheduleText(ctx.chat.id, new Date(), 'сегодня'), { parse_mode: 'Markdown' });
 });
 
-bot.command('tomorrow', async (ctx) => {
+bot.hears('📆 Завтра', async (ctx) => {
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   await ctx.reply(formatScheduleText(ctx.chat.id, tomorrow, 'завтра'), { parse_mode: 'Markdown' });
 });
 
-bot.command('edit', async (ctx) => {
+bot.hears('⚙️ Настроить расписание', async (ctx) => {
   ctx.session.step = null;
   const keyboard = new InlineKeyboard()
     .text('Четная неделя', 'week_even')
     .text('Нечетная неделя', 'week_odd');
   
-  await ctx.reply('⚙️ **Настройка личного расписания**\nВыбери тип недели:', {
+  await ctx.reply('⚙️ **Выбери тип недели для редактирования:**', {
     reply_markup: keyboard,
     parse_mode: 'Markdown'
   });
 });
 
-// Кнопки взаимодействия
+// --- ИНЛАЙН НАВИГАЦИЯ И КНОПКИ ---
+
 bot.callbackQuery(/^week_(even|odd)$/, async (ctx) => {
   const week = ctx.match[1];
   ctx.session.week = week;
@@ -151,8 +143,21 @@ bot.callbackQuery(/^week_(even|odd)$/, async (ctx) => {
   Object.entries(DAYS).forEach(([id, name]) => {
     keyboard.text(name, `day_${id}`).row();
   });
+  keyboard.text('⬅️ Назад к выбору недели', 'back_to_weeks');
 
-  await ctx.editMessageText(`Выбрана **${week === 'even' ? 'Четная' : 'Нечетная'} неделя**.\nВыбери день:`, {
+  await ctx.editMessageText(`Выбрана **${week === 'even' ? 'Четная' : 'Нечетная'} неделя**.\nВыбери день недели:`, {
+    reply_markup: keyboard,
+    parse_mode: 'Markdown'
+  });
+  await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery('back_to_weeks', async (ctx) => {
+  const keyboard = new InlineKeyboard()
+    .text('Четная неделя', 'week_even')
+    .text('Нечетная неделя', 'week_odd');
+
+  await ctx.editMessageText('⚙️ **Выбери тип недели:**', {
     reply_markup: keyboard,
     parse_mode: 'Markdown'
   });
@@ -168,16 +173,17 @@ bot.callbackQuery(/^day_(\d)$/, async (ctx) => {
 
   let text = `📅 **${DAYS[day]}** (${ctx.session.week === 'even' ? 'Четная' : 'Нечетная'} неделя)\n\n`;
   if (dayData.pairs && dayData.pairs.length > 0) {
-    text += 'Пары:\n' + dayData.pairs.map((p, i) => `${i+1}. ${p.time} - ${p.name} (${p.room})`).join('\n') + '\n\n';
+    text += '📚 **Пары:**\n' + dayData.pairs.map((p, i) => `${i+1}. ${p.time} - ${p.name} (${p.room})`).join('\n') + '\n\n';
   } else {
-    text += 'Пары: отсутствуют\n\n';
+    text += '📚 **Пары:** отсутствуют\n\n';
   }
-  text += dayData.work ? `Работа: ${dayData.work.name} (${dayData.work.time})` : 'Работа: нет';
+  text += dayData.work ? `🛠 **Работа:** ${dayData.work.name} (${dayData.work.time})` : '🛠 **Работа:** нет';
 
   const keyboard = new InlineKeyboard()
     .text('➕ Добавить пару', 'add_pair').row()
     .text('🛠 Настроить работу', 'set_work').row()
-    .text('🗑 Очистить день', 'clear_day').row();
+    .text('🗑 Очистить день', 'clear_day').row()
+    .text('⬅️ Назад к дням', `week_${ctx.session.week}`);
 
   await ctx.editMessageText(text, { reply_markup: keyboard, parse_mode: 'Markdown' });
   await ctx.answerCallbackQuery();
@@ -208,6 +214,7 @@ bot.callbackQuery('clear_day', async (ctx) => {
 // Обработка текстового ввода
 bot.on('message:text', async (ctx) => {
   const chatId = ctx.chat.id;
+
   if (ctx.session.step === 'awaiting_pair') {
     const parts = ctx.message.text.split('|').map(s => s.trim());
     if (parts.length < 3) {
@@ -215,7 +222,7 @@ bot.on('message:text', async (ctx) => {
     }
 
     const data = loadData();
-    getUserData(chatId); // Проверяем существование структуры
+    getUserData(chatId);
     data[chatId].schedule[ctx.session.week][ctx.session.day].pairs.push({
       time: parts[0],
       name: parts[1],
@@ -224,7 +231,7 @@ bot.on('message:text', async (ctx) => {
 
     saveData(data);
     ctx.session.step = null;
-    await ctx.reply('✅ Пара добавлена! Отправь /edit для продолжения настройки.');
+    await ctx.reply('✅ Пара добавлена!', { reply_markup: mainKeyboard });
   } 
   else if (ctx.session.step === 'awaiting_work') {
     const parts = ctx.message.text.split('|').map(s => s.trim());
@@ -241,13 +248,12 @@ bot.on('message:text', async (ctx) => {
 
     saveData(data);
     ctx.session.step = null;
-    await ctx.reply('✅ Смена сохранена! Отправь /edit для продолжения настройки.');
+    await ctx.reply('✅ Смена сохранена!', { reply_markup: mainKeyboard });
   }
 });
 
-// МУЛЬТИПОЛЬЗОВАТЕЛЬСКИЙ КРОН
+// КРОН РАССЫЛКИ
 
-// Утренний брифинг в 08:00 всем подписанным
 cron.schedule('0 8 * * *', async () => {
   const data = loadData();
   const now = new Date();
@@ -258,13 +264,12 @@ cron.schedule('0 8 * * *', async () => {
         const message = formatScheduleText(chatId, now, 'сегодня');
         await bot.api.sendMessage(chatId, message, { parse_mode: 'Markdown' });
       } catch (err) {
-        console.error(`Ошибка отправки утренней сводки пользователю ${chatId}:`, err.message);
+        console.error(`Ошибка утренней рассылки (${chatId}):`, err.message);
       }
     }
   }
 });
 
-// Проверка смен за 1 час всем подписанным (каждую минуту)
 cron.schedule('* * * * *', async () => {
   const data = loadData();
   const now = new Date();
@@ -286,11 +291,11 @@ cron.schedule('* * * * *', async () => {
           try {
             await bot.api.sendMessage(
               chatId,
-              `⏰ **Напоминание!** Через 1 час смена: **${dayData.work.name}** (${dayData.work.time}). Пора собираться!`,
+              `⏰ **Напоминание!** Через 1 час смена: **${dayData.work.name}** (${dayData.work.time}).`,
               { parse_mode: 'Markdown' }
             );
           } catch (err) {
-            console.error(`Ошибка отправки напоминания пользователю ${chatId}:`, err.message);
+            console.error(`Ошибка напоминания (${chatId}):`, err.message);
           }
         }
       }
@@ -299,11 +304,16 @@ cron.schedule('* * * * *', async () => {
 });
 
 bot.catch((err) => {
-  console.error('Ошибка в обработке событий:', err);
+  console.error('Ошибка:', err);
 });
 
-// Принудительный сброс вебхука при запуске (чтобы long polling работал без сбоев)
-bot.api.deleteWebhook({ drop_pending_updates: true }).then(() => {
-  bot.start();
-  console.log('🤖 Бот успешно запущен в мультипользовательском режиме!');
-});
+async function startBot() {
+  try {
+    await bot.api.deleteWebhook({ drop_pending_updates: true });
+  } catch (e) {}
+
+  console.log('🤖 Бот успешно запущен!');
+  await bot.start();
+}
+
+startBot();
