@@ -3,6 +3,7 @@ const { Bot, InlineKeyboard, Keyboard, session } = require('grammy');
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios'); // npm install axios (если еще не установлен)
 
 const DATA_FILE = path.join(__dirname, 'schedule.json');
 
@@ -32,7 +33,7 @@ const TIMES = [
 
 const DAYS = { 1: 'Понедельник', 2: 'Вторник', 3: 'Среда', 4: 'Четверг', 5: 'Пятница', 6: 'Суббота', 0: 'Воскресенье' };
 
-// --- Работа с БД ---
+// --- Данные БД ---
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
     const initial = {};
@@ -59,8 +60,8 @@ function getUserData(chatId) {
         even: { 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] },
         odd: { 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] }
       },
-      work: {}, // {"YYYY-MM-DD": { start: "15:00" }}
-      notes: {} // {"YYYY-MM-DD": "текст"}
+      work: {},
+      notes: {}
     };
     saveData(data);
   }
@@ -81,20 +82,80 @@ function getWeekNumber(date = new Date()) {
   return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
 }
 
-// Расчёт времени выхода (маршруты 80, 3, 18, 55, 57 Иркутска)
-function calculateDepartureTime(eventTimeStr, isWorkOnly = false) {
+// --- Интеграция Погоды и Пробок в Иркутске ---
+async function getIrkutskConditions() {
+  let trafficScore = 4; // Базовые пробки по умолчанию
+  let weatherDelay = 0;
+  let weatherDesc = "Ясно / Умеренно";
+
+  try {
+    // Получаем погоду Иркутска через публичный API (координаты Иркутска: 52.2978, 104.2964)
+    const res = await axios.get('https://api.open-meteo.com/v1/forecast?latitude=52.2978&longitude=104.2964&current_weather=true');
+    if (res.data && res.data.current_weather) {
+      const temp = res.data.current_weather.temperature;
+      const weatherCode = res.data.current_weather.weathercode;
+
+      // Анализ условий погоды (снег, мороз, дождь)
+      if (temp < -20) {
+        weatherDelay += 10;
+        weatherDesc = `Сильный мороз (${temp}°C)`;
+      } else if (temp < -10) {
+        weatherDelay += 5;
+        weatherDesc = `Морозльно (${temp}°C)`;
+      }
+
+      // Коды Open-Meteo: 71,73,75 - снег, 95+ - шторм
+      if ([71, 73, 75, 85, 86].includes(weatherCode)) {
+        weatherDelay += 10;
+        weatherDesc += ", Снегопад ❄️";
+      } else if ([61, 63, 65].includes(weatherCode)) {
+        weatherDelay += 5;
+        weatherDesc += ", Дождь 🌧";
+      }
+    }
+  } catch (e) {
+    console.warn("Не удалось получить погоду:", e.message);
+  }
+
+  // Часы пик в Иркутске увеличивают балл пробок
+  const hour = new Date().getHours();
+  if ((hour >= 7 && hour <= 9) || (hour >= 17 && hour <= 19)) {
+    trafficScore = 7;
+  }
+
+  return { trafficScore, weatherDelay, weatherDesc };
+}
+
+// Усовершенствованный расчет времени выхода
+async function calculateDepartureTime(eventTimeStr, isWorkOnly = false) {
   const [hours, minutes] = eventTimeStr.split(':').map(Number);
   let totalEventMinutes = hours * 60 + minutes;
 
   if (isWorkOnly) {
-    // 20 минут пешком
-    return totalEventMinutes - 20;
-  } else {
-    // Учёба: 6 мин пешком до остановки + ожидания (в пик ~6 мин, не пик ~12 мин) + дорога (~25 мин)
-    let waitTime = (hours >= 7 && hours <= 9) || (hours >= 17 && hours <= 19) ? 6 : 12;
-    let travelTime = 6 + waitTime + 25;
-    return totalEventMinutes - travelTime;
+    // Если только работа — 20 минут пешком
+    return {
+      depMinutes: totalEventMinutes - 20,
+      details: "20 минут пешком до работы"
+    };
   }
+
+  const { trafficScore, weatherDelay, weatherDesc } = await getIrkutskConditions();
+
+  // Расчет задержки от пробок (маршруты 80, 3, 18, 55, 57)
+  let trafficDelay = 0;
+  if (trafficScore >= 7) trafficDelay = 15;
+  else if (trafficScore >= 5) trafficDelay = 8;
+
+  const walkToStop = 6; // 6 минут до остановки
+  const baseTravel = 25; // Базовое время поездки
+  const waitTime = (hours >= 7 && hours <= 9) ? 6 : 10; // Ожидание транспорта
+
+  const totalTravelTime = walkToStop + waitTime + baseTravel + trafficDelay + weatherDelay;
+  const depMinutes = totalEventMinutes - totalTravelTime;
+
+  const details = `6 мин до остановки + ${baseTravel + trafficDelay} мин в пути (маршруты 80, 3, 18, 55, 57, пробки: ${trafficScore}/10) + погода: ${weatherDesc}`;
+
+  return { depMinutes, details };
 }
 
 function formatMinutesToTime(totalMinutes) {
@@ -104,8 +165,8 @@ function formatMinutesToTime(totalMinutes) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-// Построение отчёта на конкретную дату
-function buildDailyReport(chatId, targetDate = new Date()) {
+// Построение отчёта
+async function buildDailyReport(chatId, targetDate = new Date()) {
   const userData = getUserData(chatId);
   const dateStr = targetDate.toISOString().split('T')[0];
   const dayOfWeek = targetDate.getDay();
@@ -145,12 +206,10 @@ function buildDailyReport(chatId, targetDate = new Date()) {
   }
 
   if (earliestTime) {
-    const depMinutes = calculateDepartureTime(earliestTime, isWorkOnly);
+    const { depMinutes, details } = await calculateDepartureTime(earliestTime, isWorkOnly);
     const depTimeStr = formatMinutesToTime(depMinutes);
     text += `🚶‍♂️ **Время выхода из дома:** \`${depTimeStr}\`\n`;
-    text += isWorkOnly 
-      ? `_(Рассчитано: 20 минут пешком до работы)_\n` 
-      : `_(Рассчитано: 6 мин до остановки + общественный транспорт Иркутска №80, 3, 18, 55, 57)_\n`;
+    text += `_(${details})_\n`;
   } else {
     text += '🎉 Полностью свободный день!\n';
   }
@@ -162,9 +221,10 @@ function buildDailyReport(chatId, targetDate = new Date()) {
   return text;
 }
 
-// Главная нижняя клавиатура
+// Обновленная главная клавиатура с кнопкой отчета на завтра
 const mainKeyboard = new Keyboard()
   .text('📅 Сегодня').text('📆 Завтра').row()
+  .text('📊 Отчет на завтра (детальный)').row()
   .text('📚 Настроить пары').text('💼 Настроить работу').row()
   .text('📝 Заметка / Вещи')
   .resized();
@@ -180,16 +240,25 @@ bot.command('start', async (ctx) => {
 
 // --- НАЖАТИЯ НИЖНИХ КНОПОК ---
 bot.hears('📅 Сегодня', async (ctx) => {
-  await ctx.reply(buildDailyReport(ctx.chat.id, new Date()), { parse_mode: 'Markdown' });
+  const report = await buildDailyReport(ctx.chat.id, new Date());
+  await ctx.reply(report, { parse_mode: 'Markdown' });
 });
 
 bot.hears('📆 Завтра', async (ctx) => {
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
-  await ctx.reply(buildDailyReport(ctx.chat.id, tomorrow), { parse_mode: 'Markdown' });
+  const report = await buildDailyReport(ctx.chat.id, tomorrow);
+  await ctx.reply(report, { parse_mode: 'Markdown' });
 });
 
-// --- ДОБАВЛЕНИЕ ПАР ---
+bot.hears('📊 Отчет на завтра (детальный)', async (ctx) => {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const report = await buildDailyReport(ctx.chat.id, tomorrow);
+  await ctx.reply(`📊 **Запрошенный отчет на завтра:**\n\n${report}`, { parse_mode: 'Markdown' });
+});
+
+// --- НАСТРОЙКА ПАР ---
 bot.hears('📚 Настроить пары', async (ctx) => {
   const kb = new InlineKeyboard()
     .text('Четная неделя', 'pair_week_even')
@@ -252,13 +321,12 @@ bot.callbackQuery(/^time_select_(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// --- НАСТРОЙКА РАБОТЫ (ОТДЕЛЬНО НА ДНИ) ---
+// --- РАБОТА И ЗАМЕТКИ ---
 bot.hears('💼 Настроить работу', async (ctx) => {
   ctx.session.step = 'awaiting_work_date';
   await ctx.reply('💼 Введи дату работы в формате **ГГГГ-ММ-ДД** (например, `2026-09-26`):', { parse_mode: 'Markdown' });
 });
 
-// --- ЗАМЕТКА / ВЕЩИ ---
 bot.hears('📝 Заметка / Вещи', async (ctx) => {
   ctx.session.step = 'awaiting_note_date';
   await ctx.reply('📝 Введи дату для заметки в формате **ГГГГ-ММ-ДД** (например, `2026-09-26`):', { parse_mode: 'Markdown' });
@@ -269,7 +337,7 @@ bot.callbackQuery('close_menu', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// --- ТЕКСТОВЫЙ ВВОД (АУДИТОРИЯ, ДАТЫ, ЗАМЕТКИ) ---
+// --- ТЕКСТОВЫЙ ВВОД ---
 bot.on('message:text', async (ctx) => {
   const chatId = ctx.chat.id;
 
@@ -320,9 +388,8 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// --- КРОН-РАССЫЛКИ (ВЕЧЕР В 22:00 И УТРОМ ЗА 1 ЧАС ДО ВЫХОДА) ---
+// --- КРОН РАССЫЛКИ ---
 
-// Каждый вечер в 22:00
 cron.schedule('0 22 * * *', async () => {
   const data = loadData();
   const tomorrow = new Date();
@@ -331,7 +398,7 @@ cron.schedule('0 22 * * *', async () => {
   for (const chatId of Object.keys(data)) {
     if (data[chatId].subscribed) {
       try {
-        const report = buildDailyReport(chatId, tomorrow);
+        const report = await buildDailyReport(chatId, tomorrow);
         await bot.api.sendMessage(chatId, `🌆 **Вечерний отчёт на завтра (22:00)**\n\n${report}`, { parse_mode: 'Markdown' });
       } catch (err) {
         console.error(`Ошибка отправки вечернего отчета (${chatId}):`, err.message);
@@ -340,7 +407,6 @@ cron.schedule('0 22 * * *', async () => {
   }
 });
 
-// Проверка утреннего уведомления (за 1 час до выхода)
 cron.schedule('* * * * *', async () => {
   const data = loadData();
   const now = new Date();
@@ -365,10 +431,9 @@ cron.schedule('* * * * *', async () => {
       }
 
       if (earliestTime) {
-        const depMinutes = calculateDepartureTime(earliestTime, isWorkOnly);
+        const { depMinutes } = await calculateDepartureTime(earliestTime, isWorkOnly);
         const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
-        // Если до выхода остался ровно 60 минут
         if (depMinutes - currentMinutes === 60) {
           try {
             const note = data[chatId].notes?.[dateStr] || 'Ничего специального';
@@ -392,7 +457,7 @@ async function startBot() {
     await bot.api.setMyCommands([]);
   } catch (e) {}
 
-  console.log('🤖 Обновленный бот успешно запущен!');
+  console.log('🤖 Запущен бот с анализом пробок, погоды и ручным запросом отчета!');
   await bot.start();
 }
 
