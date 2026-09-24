@@ -19,7 +19,7 @@ const SUBJECTS = [
   "Автоматизация в нефтегазе(Мельник)",
   "БЖД(Тюкалова)",
   "Проектирование(никитос)",
-  "Проект (Ершов)" // <--- Добавленная пара
+  "Проект (Ершов)"
 ];
 
 const TIMES = [
@@ -33,6 +33,48 @@ const TIMES = [
 ];
 
 const DAYS = { 1: 'Понедельник', 2: 'Вторник', 3: 'Среда', 4: 'Четверг', 5: 'Пятница', 6: 'Суббота', 0: 'Воскресенье' };
+
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ВРЕМЕНИ И ДАТ (UTC+8 ИРКУТСК) ---
+
+// Текущая дата/время по Иркутску
+function getIrkutskDate(date = new Date()) {
+  const utc = date.getTime() + (date.getTimezoneOffset() * 60000);
+  return new Date(utc + (3600000 * 8));
+}
+
+// Преобразование Date -> DD.MM.YYYY
+function formatDateRU(d) {
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const year = d.getFullYear();
+  return `${day}.${month}.${year}`;
+}
+
+// Преобразование DD.MM.YYYY -> YYYY-MM-DD (для хранения)
+function parseRUDateToISO(ruDateStr) {
+  const parts = ruDateStr.split('.');
+  if (parts.length !== 3) return null;
+  return `${parts[2]}-${parts[1]}-${parts[0]}`;
+}
+
+// Преобразование YYYY-MM-DD -> DD.MM.YYYY (для вывода)
+function formatISOToRU(isoDateStr) {
+  const parts = isoDateStr.split('-');
+  if (parts.length !== 3) return isoDateStr;
+  return `${parts[2]}.${parts[1]}.${parts[0]}`;
+}
+
+// Определение четности недели (21.09.2026 - 27.09.2026 четная)
+function isEvenWeek(targetDate = getIrkutskDate()) {
+  // Базовый понедельник четной недели: 21.09.2026
+  const anchorDate = new Date(2026, 8, 21); // Month is 0-indexed (8 = September)
+  const diffTime = targetDate.getTime() - anchorDate.getTime();
+  const diffDays = Math.floor(diffTime / (1000 * 3600 * 24));
+  const diffWeeks = Math.floor(diffDays / 7);
+  
+  // Если разница в неделях четная — неделя четная
+  return Math.abs(diffWeeks) % 2 === 0;
+}
 
 // --- БД ---
 function loadData() {
@@ -75,19 +117,11 @@ bot.use(session({
   initial: () => ({ step: null, week: null, day: null, tempSubject: null, tempTime: null, dateStr: null })
 }));
 
-function getWeekNumber(date = new Date()) {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  const dayNum = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-}
-
-// --- Интеграция Погоды и Пробок в Иркутске ---
+// --- Пробки и погода в Иркутске ---
 async function getIrkutskConditions() {
   let trafficScore = 4;
   let weatherDelay = 0;
-  let weatherDesc = "Ясно / Умеренно";
+  let weatherDesc = "ясно";
 
   try {
     const res = await axios.get('https://api.open-meteo.com/v1/forecast?latitude=52.2978&longitude=104.2964&current_weather=true');
@@ -97,25 +131,27 @@ async function getIrkutskConditions() {
 
       if (temp < -20) {
         weatherDelay += 10;
-        weatherDesc = `Сильный мороз (${temp}°C)`;
+        weatherDesc = `сильный мороз (${temp}°C)`;
       } else if (temp < -10) {
         weatherDelay += 5;
-        weatherDesc = `Морозно (${temp}°C)`;
+        weatherDesc = `морозно (${temp}°C)`;
+      } else {
+        weatherDesc = `${temp}°C`;
       }
 
       if ([71, 73, 75, 85, 86].includes(weatherCode)) {
         weatherDelay += 10;
-        weatherDesc += ", Снегопад ❄️";
+        weatherDesc += ", снегопад";
       } else if ([61, 63, 65].includes(weatherCode)) {
         weatherDelay += 5;
-        weatherDesc += ", Дождь 🌧";
+        weatherDesc += ", дождь";
       }
     }
   } catch (e) {
-    console.warn("Не удалось получить погоду:", e.message);
+    console.warn("Ошибка получения погоды:", e.message);
   }
 
-  const hour = new Date().getHours();
+  const hour = getIrkutskDate().getHours();
   if ((hour >= 7 && hour <= 9) || (hour >= 17 && hour <= 19)) {
     trafficScore = 7;
   }
@@ -128,13 +164,10 @@ async function calculateDepartureTime(eventTimeStr, isWorkOnly = false) {
   let totalEventMinutes = hours * 60 + minutes;
 
   if (isWorkOnly) {
-    return {
-      depMinutes: totalEventMinutes - 20,
-      details: "20 минут пешком до работы"
-    };
+    return totalEventMinutes - 20;
   }
 
-  const { trafficScore, weatherDelay, weatherDesc } = await getIrkutskConditions();
+  const { trafficScore, weatherDelay } = await getIrkutskConditions();
 
   let trafficDelay = 0;
   if (trafficScore >= 7) trafficDelay = 15;
@@ -145,11 +178,7 @@ async function calculateDepartureTime(eventTimeStr, isWorkOnly = false) {
   const waitTime = (hours >= 7 && hours <= 9) ? 6 : 10;
 
   const totalTravelTime = walkToStop + waitTime + baseTravel + trafficDelay + weatherDelay;
-  const depMinutes = totalEventMinutes - totalTravelTime;
-
-  const details = `6 мин до остановки + ${baseTravel + trafficDelay} мин в пути (маршруты 80, 3, 18, 55, 57, пробки: ${trafficScore}/10) + погода: ${weatherDesc}`;
-
-  return { depMinutes, details };
+  return totalEventMinutes - totalTravelTime;
 }
 
 function formatMinutesToTime(totalMinutes) {
@@ -159,139 +188,133 @@ function formatMinutesToTime(totalMinutes) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-// Построение отчёта
-async function buildDailyReport(chatId, targetDate = new Date()) {
+// --- Построение СУХОГО отчёта ---
+async function buildDailyReport(chatId, targetDate = getIrkutskDate(), isMorning = false) {
   const userData = getUserData(chatId);
-  const dateStr = targetDate.toISOString().split('T')[0];
+  const isoDateStr = targetDate.toISOString().split('T')[0];
+  const ruDateStr = formatDateRU(targetDate);
   const dayOfWeek = targetDate.getDay();
   
-  const weekNum = getWeekNumber(targetDate);
-  const isEven = weekNum % 2 === 0;
+  const isEven = isEvenWeek(targetDate);
   const weekKey = isEven ? 'even' : 'odd';
 
   const classes = userData.schedule[weekKey]?.[dayOfWeek] || [];
-  const workShift = userData.work?.[dateStr];
-  const note = userData.notes?.[dateStr];
+  const workShift = userData.work?.[isoDateStr];
+  const note = userData.notes?.[isoDateStr] || "нет";
 
-  let text = `📋 **Расписание на ${dateStr} (${DAYS[dayOfWeek]})**:\n\n`;
+  const { trafficScore, weatherDesc } = await getIrkutskConditions();
+
+  let greeting = isMorning ? "доброе утро!" : `отчет на ${ruDateStr}:`;
+  let lines = [`${greeting} сегодня следующие пары:`];
 
   let earliestTime = null;
   let isWorkOnly = false;
 
   if (classes.length > 0) {
-    text += '📚 **Пары:**\n';
     classes.forEach((p, idx) => {
-      text += `${idx + 1}. **${p.time}** — ${p.subject} (ауд. ${p.room})\n`;
+      lines.push(`${idx + 1}. ${p.time} — ${p.subject} (ауд. ${p.room})`);
     });
-    text += '\n';
     earliestTime = classes[0].time.split('-')[0].trim();
   } else {
-    text += '📚 **Пары:** нет\n\n';
+    lines.push("нет");
   }
 
   if (workShift) {
-    text += `🛠 **Работа:** начало в **${workShift.start}**\n\n`;
+    lines.push(`работа: ${workShift.start}`);
     if (!classes.length) {
-      earliestTime = workShift.start;
+      earliestTime = workShift.start.split('-')[0].trim();
       isWorkOnly = true;
     }
   } else {
-    text += '🛠 **Работа:** нет\n\n';
+    lines.push("работа: нет");
   }
 
   if (earliestTime) {
-    const { depMinutes, details } = await calculateDepartureTime(earliestTime, isWorkOnly);
+    const depMinutes = await calculateDepartureTime(earliestTime, isWorkOnly);
     const depTimeStr = formatMinutesToTime(depMinutes);
-    text += `🚶‍♂️ **Время выхода из дома:** \`${depTimeStr}\`\n`;
-    text += `_(${details})_\n`;
+    lines.push(`выходить из дома в ${depTimeStr}`);
   } else {
-    text += '🎉 Полностью свободный день!\n';
+    lines.push("выходить из дома: не требуется");
   }
 
-  if (note) {
-    text += `\n🎒 **Заметка (что взять с собой):**\n${note}\n`;
-  }
+  lines.push(`пробки: ${trafficScore} баллов`);
+  lines.push(`погода: ${weatherDesc}`);
+  lines.push(`взять с собой: ${note}`);
 
-  return text;
+  return lines.join('\n');
 }
 
-// Вспомогательная функция для отображения меню конкретного дня
 function buildDayMenuTextAndKeyboard(chatId, week, day) {
   const userData = getUserData(chatId);
   const classes = userData.schedule[week]?.[day] || [];
 
-  let text = `📅 **Редактирование дня: ${DAYS[day]}** (${week === 'even' ? 'Четная' : 'Нечетная'} неделя)\n\n`;
+  let text = `редактирование дня: ${DAYS[day]} (${week === 'even' ? 'четная' : 'нечетная'} неделя)\n\nтекущие пары:\n`;
 
   if (classes.length === 0) {
-    text += '📚 На этот день нет запланированных пар.';
+    text += 'нет';
   } else {
-    text += '📚 **Текущие пары:**\n';
     classes.forEach((p, idx) => {
-      text += `${idx + 1}. **${p.time}** — ${p.subject} (ауд. ${p.room})\n`;
+      text += `${idx + 1}. ${p.time} — ${p.subject} (ауд. ${p.room})\n`;
     });
   }
 
   const kb = new InlineKeyboard();
-  kb.text('➕ Добавить пару', 'start_add_pair').row();
+  kb.text('добавить пару', 'start_add_pair').row();
 
   if (classes.length > 0) {
-    // Выборочное удаление каждой пары
     classes.forEach((p, idx) => {
       const shortTitle = p.subject.split('(')[0].trim();
-      kb.text(`❌ Удалить: ${p.time} ${shortTitle}`, `delete_pair_${idx}`).row();
+      kb.text(`удалить: ${p.time} ${shortTitle}`, `delete_pair_${idx}`).row();
     });
-    kb.text('🗑 Очистить весь день', 'clear_entire_day').row();
+    kb.text('очистить весь день', 'clear_entire_day').row();
   }
 
-  kb.text('⬅️ Назад к выбору дней', `pair_week_${week}`);
+  kb.text('назад к выбору дней', `pair_week_${week}`);
 
   return { text, kb };
 }
 
-// Главная клавиатура
+// Клавиатура
 const mainKeyboard = new Keyboard()
-  .text('📅 Сегодня').text('📆 Завтра').row()
-  .text('📊 Отчет на завтра (детальный)').row()
-  .text('📚 Настроить пары').text('💼 Настроить работу').row()
-  .text('📝 Заметка / Вещи')
+  .text('сегодня').text('завтра').row()
+  .text('отчет на завтра').row()
+  .text('настроить пары').text('настроить работу').row()
+  .text('заметка / вещи')
   .resized();
 
 // --- КОМАНДА /start ---
 bot.command('start', async (ctx) => {
   getUserData(ctx.chat.id);
-  await ctx.reply(
-    '👋 Привет! Используй меню ниже для управления расписанием:',
-    { reply_markup: mainKeyboard }
-  );
+  await ctx.reply('используй меню ниже для управления расписанием:', { reply_markup: mainKeyboard });
 });
 
-// --- НАЖАТИЯ НИЖНИХ КНОПОК ---
-bot.hears('📅 Сегодня', async (ctx) => {
-  const report = await buildDailyReport(ctx.chat.id, new Date());
-  await ctx.reply(report, { parse_mode: 'Markdown' });
+// --- КНОПКИ ГЛАВНОГО МЕНЮ ---
+bot.hears('сегодня', async (ctx) => {
+  const report = await buildDailyReport(ctx.chat.id, getIrkutskDate(), true);
+  await ctx.reply(report);
 });
 
-bot.hears('📆 Завтра', async (ctx) => {
-  const tomorrow = new Date();
+bot.hears('завтра', async (ctx) => {
+  const tomorrow = getIrkutskDate();
   tomorrow.setDate(tomorrow.getDate() + 1);
-  const report = await buildDailyReport(ctx.chat.id, tomorrow);
-  await ctx.reply(report, { parse_mode: 'Markdown' });
+  const report = await buildDailyReport(ctx.chat.id, tomorrow, false);
+  await ctx.reply(report);
 });
 
-bot.hears('📊 Отчет на завтра (детальный)', async (ctx) => {
-  const tomorrow = new Date();
+bot.hears('отчет на завтра', async (ctx) => {
+  const tomorrow = getIrkutskDate();
   tomorrow.setDate(tomorrow.getDate() + 1);
-  const report = await buildDailyReport(ctx.chat.id, tomorrow);
-  await ctx.reply(`📊 **Запрошенный отчет на завтра:**\n\n${report}`, { parse_mode: 'Markdown' });
+  const report = await buildDailyReport(ctx.chat.id, tomorrow, false);
+  await ctx.reply(report);
 });
 
 // --- НАСТРОЙКА ПАР ---
-bot.hears('📚 Настроить пары', async (ctx) => {
+bot.hears('настроить пары', async (ctx) => {
   const kb = new InlineKeyboard()
-    .text('Четная неделя', 'pair_week_even')
-    .text('Нечетная неделя', 'pair_week_odd').row()
-    .text('❌ Закрыть', 'close_menu');
-  await ctx.reply('⚙️ Выбери тип недели для пар:', { reply_markup: kb });
+    .text('четная неделя', 'pair_week_even')
+    .text('нечетная неделя', 'pair_week_odd').row()
+    .text('закрыть', 'close_menu');
+  await ctx.reply('выбери тип недели:', { reply_markup: kb });
 });
 
 bot.callbackQuery(/^pair_week_(even|odd)$/, async (ctx) => {
@@ -300,32 +323,27 @@ bot.callbackQuery(/^pair_week_(even|odd)$/, async (ctx) => {
   for (let id = 1; id <= 6; id++) {
     kb.text(DAYS[id], `pair_day_${id}`).row();
   }
-  kb.text('⬅️ Назад', 'back_to_pair_weeks');
-  await ctx.editMessageText(`Выбрана **${ctx.session.week === 'even' ? 'Четная' : 'Нечетная'} неделя**. Выбери день:`, {
-    reply_markup: kb,
-    parse_mode: 'Markdown'
-  });
+  kb.text('назад', 'back_to_pair_weeks');
+  await ctx.editMessageText(`выбрана ${ctx.session.week === 'even' ? 'четная' : 'нечетная'} неделя. выбери день:`, { reply_markup: kb });
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery('back_to_pair_weeks', async (ctx) => {
   const kb = new InlineKeyboard()
-    .text('Четная неделя', 'pair_week_even')
-    .text('Нечетная неделя', 'pair_week_odd').row()
-    .text('❌ Закрыть', 'close_menu');
-  await ctx.editMessageText('⚙️ Выбери тип недели:', { reply_markup: kb });
+    .text('четная неделя', 'pair_week_even')
+    .text('нечетная неделя', 'pair_week_odd').row()
+    .text('закрыть', 'close_menu');
+  await ctx.editMessageText('выбери тип недели:', { reply_markup: kb });
   await ctx.answerCallbackQuery();
 });
 
-// Экран конкретного дня с просмотром и удалением
 bot.callbackQuery(/^pair_day_(\d)$/, async (ctx) => {
   ctx.session.day = ctx.match[1];
   const { text, kb } = buildDayMenuTextAndKeyboard(ctx.chat.id, ctx.session.week, ctx.session.day);
-  await ctx.editMessageText(text, { reply_markup: kb, parse_mode: 'Markdown' });
+  await ctx.editMessageText(text, { reply_markup: kb });
   await ctx.answerCallbackQuery();
 });
 
-// Удаление выбранной пары
 bot.callbackQuery(/^delete_pair_(\d+)$/, async (ctx) => {
   const pairIdx = parseInt(ctx.match[1]);
   const data = loadData();
@@ -338,11 +356,10 @@ bot.callbackQuery(/^delete_pair_(\d+)$/, async (ctx) => {
   }
 
   const { text, kb } = buildDayMenuTextAndKeyboard(ctx.chat.id, week, day);
-  await ctx.editMessageText(text, { reply_markup: kb, parse_mode: 'Markdown' });
-  await ctx.answerCallbackQuery({ text: 'Пара удалена' });
+  await ctx.editMessageText(text, { reply_markup: kb });
+  await ctx.answerCallbackQuery({ text: 'пара удалена' });
 });
 
-// Очистка всех пар за день
 bot.callbackQuery('clear_entire_day', async (ctx) => {
   const data = loadData();
   const week = ctx.session.week;
@@ -354,18 +371,17 @@ bot.callbackQuery('clear_entire_day', async (ctx) => {
   }
 
   const { text, kb } = buildDayMenuTextAndKeyboard(ctx.chat.id, week, day);
-  await ctx.editMessageText(text, { reply_markup: kb, parse_mode: 'Markdown' });
-  await ctx.answerCallbackQuery({ text: 'Все пары на день очищены' });
+  await ctx.editMessageText(text, { reply_markup: kb });
+  await ctx.answerCallbackQuery({ text: 'день очищен' });
 });
 
-// Начало добавления пары
 bot.callbackQuery('start_add_pair', async (ctx) => {
   const kb = new InlineKeyboard();
   SUBJECTS.forEach((subj, idx) => {
     kb.text(subj, `subj_select_${idx}`).row();
   });
-  kb.text('⬅️ Назад', `pair_day_${ctx.session.day}`);
-  await ctx.editMessageText('📚 Выбери **пара / преподаватель**:', { reply_markup: kb, parse_mode: 'Markdown' });
+  kb.text('назад', `pair_day_${ctx.session.day}`);
+  await ctx.editMessageText('выбери предмет:', { reply_markup: kb });
   await ctx.answerCallbackQuery();
 });
 
@@ -377,27 +393,27 @@ bot.callbackQuery(/^subj_select_(\d+)$/, async (ctx) => {
   TIMES.forEach((timeStr) => {
     kb.text(timeStr, `time_select_${timeStr}`).row();
   });
-  kb.text('⬅️ Назад', 'start_add_pair');
-  await ctx.editMessageText(`Выбрано: **${ctx.session.tempSubject}**\n\nВыбери время пары:`, { reply_markup: kb, parse_mode: 'Markdown' });
+  kb.text('назад', 'start_add_pair');
+  await ctx.editMessageText(`выбрано: ${ctx.session.tempSubject}\nвыбери время:`, { reply_markup: kb });
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery(/^time_select_(.+)$/, async (ctx) => {
   ctx.session.tempTime = ctx.match[1];
   ctx.session.step = 'awaiting_room';
-  await ctx.reply(`Время: **${ctx.session.tempTime}**\n\nНапиши аудиторию (например \`304\` или \`А-12\`):`, { parse_mode: 'Markdown' });
+  await ctx.reply(`время: ${ctx.session.tempTime}\nнапиши аудиторию (например 304):`);
   await ctx.answerCallbackQuery();
 });
 
 // --- РАБОТА И ЗАМЕТКИ ---
-bot.hears('💼 Настроить работу', async (ctx) => {
+bot.hears('настроить работу', async (ctx) => {
   ctx.session.step = 'awaiting_work_date';
-  await ctx.reply('💼 Введи дату работы в формате **ГГГГ-ММ-ДД** (например, `2026-09-26`):', { parse_mode: 'Markdown' });
+  await ctx.reply('введи дату работы в формате ДД.ММ.ГГГГ (например 25.09.2026):');
 });
 
-bot.hears('📝 Заметка / Вещи', async (ctx) => {
+bot.hears('заметка / вещи', async (ctx) => {
   ctx.session.step = 'awaiting_note_date';
-  await ctx.reply('📝 Введи дату для заметки в формате **ГГГГ-ММ-ДД** (например, `2026-09-26`):', { parse_mode: 'Markdown' });
+  await ctx.reply('введи дату в формате ДД.ММ.ГГГГ (например 25.09.2026):');
 });
 
 bot.callbackQuery('close_menu', async (ctx) => {
@@ -426,16 +442,19 @@ bot.on('message:text', async (ctx) => {
     saveData(data);
     ctx.session.step = null;
 
-    await ctx.reply(`✅ Пара **${ctx.session.tempSubject}** добавлена!`);
+    await ctx.reply(`пара ${ctx.session.tempSubject} добавлена`);
 
-    // Возвращаем пользователя обратно в меню редактирования текущего дня
     const { text, kb } = buildDayMenuTextAndKeyboard(chatId, week, day);
-    await ctx.reply(text, { reply_markup: kb, parse_mode: 'Markdown' });
+    await ctx.reply(text, { reply_markup: kb });
   } 
   else if (ctx.session.step === 'awaiting_work_date') {
-    ctx.session.dateStr = ctx.message.text.trim();
+    const ruDate = ctx.message.text.trim();
+    const isoDate = parseRUDateToISO(ruDate);
+    if (!isoDate) return ctx.reply('неверный формат. напиши дату как ДД.ММ.ГГГГ (например 25.09.2026):');
+
+    ctx.session.dateStr = isoDate;
     ctx.session.step = 'awaiting_work_time';
-    await ctx.reply('Введи время начала смены в формате **ЧЧ:ММ** (например, `15:00`):', { parse_mode: 'Markdown' });
+    await ctx.reply('введи время работы (например 15:00-21:00 или 15:00):');
   }
   else if (ctx.session.step === 'awaiting_work_time') {
     const workTime = ctx.message.text.trim();
@@ -445,12 +464,16 @@ bot.on('message:text', async (ctx) => {
     data[chatId].work[ctx.session.dateStr] = { start: workTime };
     saveData(data);
     ctx.session.step = null;
-    await ctx.reply(`✅ Смена на **${ctx.session.dateStr}** в **${workTime}** сохранена!`, { reply_markup: mainKeyboard });
+    await ctx.reply(`смена на ${formatISOToRU(ctx.session.dateStr)} (${workTime}) сохранена`, { reply_markup: mainKeyboard });
   }
   else if (ctx.session.step === 'awaiting_note_date') {
-    ctx.session.dateStr = ctx.message.text.trim();
+    const ruDate = ctx.message.text.trim();
+    const isoDate = parseRUDateToISO(ruDate);
+    if (!isoDate) return ctx.reply('неверный формат. напиши дату как ДД.ММ.ГГГГ (например 25.09.2026):');
+
+    ctx.session.dateStr = isoDate;
     ctx.session.step = 'awaiting_note_text';
-    await ctx.reply('Напиши список вещей или заметку на этот день:', { parse_mode: 'Markdown' });
+    await ctx.reply('напиши список вещей или заметку:');
   }
   else if (ctx.session.step === 'awaiting_note_text') {
     const noteText = ctx.message.text.trim();
@@ -460,40 +483,43 @@ bot.on('message:text', async (ctx) => {
     data[chatId].notes[ctx.session.dateStr] = noteText;
     saveData(data);
     ctx.session.step = null;
-    await ctx.reply(`✅ Заметка на **${ctx.session.dateStr}** сохранена!`, { reply_markup: mainKeyboard });
+    await ctx.reply(`заметка на ${formatISOToRU(ctx.session.dateStr)} сохранена`, { reply_markup: mainKeyboard });
   }
 });
 
-// --- КРОН РАССЫЛКИ ---
+// --- КРОН-РАССЫЛКИ С УЧЕТОМ ЧАСОВОГО ПОЯСА ИРКУТСКА (UTC+8) ---
+
+// Вечерний отчет каждый день в 22:00 по Иркутску
 cron.schedule('0 22 * * *', async () => {
   const data = loadData();
-  const tomorrow = new Date();
+  const tomorrow = getIrkutskDate();
   tomorrow.setDate(tomorrow.getDate() + 1);
 
   for (const chatId of Object.keys(data)) {
     if (data[chatId].subscribed) {
       try {
-        const report = await buildDailyReport(chatId, tomorrow);
-        await bot.api.sendMessage(chatId, `🌆 **Вечерний отчёт на завтра (22:00)**\n\n${report}`, { parse_mode: 'Markdown' });
+        const report = await buildDailyReport(chatId, tomorrow, false);
+        await bot.api.sendMessage(chatId, report);
       } catch (err) {
-        console.error(`Ошибка отправки вечернего отчета (${chatId}):`, err.message);
+        console.error(`ошибка рассылки (${chatId}):`, err.message);
       }
     }
   }
-});
+}, { timezone: 'Asia/Irkutsk' });
 
+// Утреннее напоминание за 1 час до выхода по Иркутску
 cron.schedule('* * * * *', async () => {
   const data = loadData();
-  const now = new Date();
-  const dateStr = now.toISOString().split('T')[0];
+  const now = getIrkutskDate();
+  const isoDateStr = now.toISOString().split('T')[0];
   const dayOfWeek = now.getDay();
-  const weekNum = getWeekNumber(now);
-  const weekKey = weekNum % 2 === 0 ? 'even' : 'odd';
+  const isEven = isEvenWeek(now);
+  const weekKey = isEven ? 'even' : 'odd';
 
   for (const chatId of Object.keys(data)) {
     if (data[chatId].subscribed) {
       const classes = data[chatId].schedule?.[weekKey]?.[dayOfWeek] || [];
-      const workShift = data[chatId].work?.[dateStr];
+      const workShift = data[chatId].work?.[isoDateStr];
 
       let earliestTime = null;
       let isWorkOnly = false;
@@ -501,30 +527,29 @@ cron.schedule('* * * * *', async () => {
       if (classes.length > 0) {
         earliestTime = classes[0].time.split('-')[0].trim();
       } else if (workShift) {
-        earliestTime = workShift.start;
+        earliestTime = workShift.start.split('-')[0].trim();
         isWorkOnly = true;
       }
 
       if (earliestTime) {
-        const { depMinutes } = await calculateDepartureTime(earliestTime, isWorkOnly);
+        const depMinutes = await calculateDepartureTime(earliestTime, isWorkOnly);
         const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
         if (depMinutes - currentMinutes === 60) {
           try {
-            const note = data[chatId].notes?.[dateStr] || 'Ничего специального';
+            const note = data[chatId].notes?.[isoDateStr] || 'нет';
             await bot.api.sendMessage(
               chatId,
-              `⏰ **Утреннее напоминание!** До выхода из дома остался 1 час!\n\n🎒 **Не забудь взять с собой:**\n${note}`,
-              { parse_mode: 'Markdown' }
+              `доброе утро! до выхода из дома остался 1 час.\nвзять с собой: ${note}`
             );
           } catch (err) {
-            console.error(`Ошибка утреннего напоминания (${chatId}):`, err.message);
+            console.error(`ошибка напоминания (${chatId}):`, err.message);
           }
         }
       }
     }
   }
-});
+}, { timezone: 'Asia/Irkutsk' });
 
 async function startBot() {
   try {
@@ -532,7 +557,7 @@ async function startBot() {
     await bot.api.setMyCommands([]);
   } catch (e) {}
 
-  console.log('🤖 Запущен бот с улучшенным меню пар и мгновенным возвратом в контекст дня!');
+  console.log('бот запущен (сухой отчет, Иркутск UTC+8, даты DD.MM.YYYY)');
   await bot.start();
 }
 
