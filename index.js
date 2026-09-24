@@ -95,7 +95,7 @@ function formatScheduleText(chatId, targetDate = new Date(), titlePrefix = 'се
   return text;
 }
 
-// Постоянная нижняя клавиатура
+// Постоянная нижняя клавиатура на экране
 const mainKeyboard = new Keyboard()
   .text('📅 Сегодня').text('📆 Завтра').row()
   .text('⚙️ Настроить расписание')
@@ -106,12 +106,12 @@ const mainKeyboard = new Keyboard()
 bot.command('start', async (ctx) => {
   getUserData(ctx.chat.id);
   await ctx.reply(
-    '👋 Привет! Используй меню ниже для быстрого доступа к расписанию:',
+    '👋 Привет! Используй кнопки на клавиатуре ниже для выбора нужного действия:',
     { reply_markup: mainKeyboard }
   );
 });
 
-// --- ОБРАБОТКА НАЖАТИЙ НИЖНИХ КНОПОК МЕНЮ ---
+// --- ОБРАБОТКА НАЖАТИЙ НИЖНИХ КНОПОК ---
 
 bot.hears('📅 Сегодня', async (ctx) => {
   await ctx.reply(formatScheduleText(ctx.chat.id, new Date(), 'сегодня'), { parse_mode: 'Markdown' });
@@ -136,7 +136,7 @@ bot.hears('⚙️ Настроить расписание', async (ctx) => {
   });
 });
 
-// --- ИНЛАЙН НАВИГАЦИЯ И КНОПКИ «НАЗАД» ---
+// --- ИНЛАЙН-МЕНЮ И НАВИГАЦИЯ (С КНОПКАМИ НАЗАД) ---
 
 // Выбор недели
 bot.callbackQuery(/^week_(even|odd)$/, async (ctx) => {
@@ -170,7 +170,7 @@ bot.callbackQuery('back_to_weeks', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// Выбор дня в конкретной неделе
+// Выбор дня в неделе
 bot.callbackQuery(/^day_(\d)$/, async (ctx) => {
   const day = ctx.match[1];
   ctx.session.day = day;
@@ -196,10 +196,10 @@ bot.callbackQuery(/^day_(\d)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// Форма добавления пары с кнопкой отмены/назад
+// Ввод пары
 bot.callbackQuery('add_pair', async (ctx) => {
   ctx.session.step = 'awaiting_pair';
-  const keyboard = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+  const keyboard = new InlineKeyboard().text('⬅️ Назад к дню', `day_${ctx.session.day}`);
   
   await ctx.reply('Пришли пару в формате:\n`Время | Название | Аудитория`\n\nПример:\n`08:30-10:00 | Высшая математика | 304`', {
     parse_mode: 'Markdown',
@@ -208,10 +208,10 @@ bot.callbackQuery('add_pair', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
-// Форма настройки работы с кнопкой отмены/назад
+// Ввод работы
 bot.callbackQuery('set_work', async (ctx) => {
   ctx.session.step = 'awaiting_work';
-  const keyboard = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+  const keyboard = new InlineKeyboard().text('⬅️ Назад к дню', `day_${ctx.session.day}`);
 
   await ctx.reply('Пришли смену в формате:\n`Время | Название`\n\nПример:\n`15:00-21:00 | Смена в мастерской`', {
     parse_mode: 'Markdown',
@@ -220,6 +220,7 @@ bot.callbackQuery('set_work', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
+// Очистить день
 bot.callbackQuery('clear_day', async (ctx) => {
   const data = loadData();
   if (data[ctx.chat.id]?.schedule[ctx.session.week]?.[ctx.session.day]) {
@@ -232,6 +233,7 @@ bot.callbackQuery('clear_day', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
+// Закрыть меню
 bot.callbackQuery('close_menu', async (ctx) => {
   await ctx.deleteMessage();
   await ctx.answerCallbackQuery();
@@ -245,7 +247,7 @@ bot.on('message:text', async (ctx) => {
   if (ctx.session.step === 'awaiting_pair') {
     const parts = ctx.message.text.split('|').map(s => s.trim());
     if (parts.length < 3) {
-      const cancelKb = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+      const cancelKb = new InlineKeyboard().text('⬅️ Назад к дню', `day_${ctx.session.day}`);
       return ctx.reply('⚠️ Неверный формат. Попробуй еще раз:\n`08:30-10:00 | Математика | 304`', {
         parse_mode: 'Markdown',
         reply_markup: cancelKb
@@ -263,13 +265,13 @@ bot.on('message:text', async (ctx) => {
     saveData(data);
     ctx.session.step = null;
     
-    const navKb = new InlineKeyboard().text('⬅️ Вернуться в день', `day_${ctx.session.day}`);
+    const navKb = new InlineKeyboard().text('⬅️ Назад к дню', `day_${ctx.session.day}`);
     await ctx.reply('✅ Пара добавлена!', { reply_markup: navKb });
   } 
   else if (ctx.session.step === 'awaiting_work') {
     const parts = ctx.message.text.split('|').map(s => s.trim());
     if (parts.length < 2) {
-      const cancelKb = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+      const cancelKb = new InlineKeyboard().text('⬅️ Назад к дню', `day_${ctx.session.day}`);
       return ctx.reply('⚠️ Неверный формат. Попробуй еще раз:\n`15:00-21:00 | Смена`', {
         parse_mode: 'Markdown',
         reply_markup: cancelKb
@@ -286,7 +288,7 @@ bot.on('message:text', async (ctx) => {
     saveData(data);
     ctx.session.step = null;
     
-    const navKb = new InlineKeyboard().text('⬅️ Вернуться в день', `day_${ctx.session.day}`);
+    const navKb = new InlineKeyboard().text('⬅️ Назад к дню', `day_${ctx.session.day}`);
     await ctx.reply('✅ Смена сохранена!', { reply_markup: navKb });
   }
 });
@@ -348,10 +350,12 @@ bot.catch((err) => {
 
 async function startBot() {
   try {
+    // Удаляем вебхук и сбрасываем старый список слэш-команд в меню Telegram
     await bot.api.deleteWebhook({ drop_pending_updates: true });
+    await bot.api.setMyCommands([]); 
   } catch (e) {}
 
-  console.log('🤖 Бот запущен (управление только кнопками с полноценной навигацией назад)!');
+  console.log('🤖 Бот запущен (управление ИСКЛЮЧИТЕЛЬНО кнопками)!');
   await bot.start();
 }
 
