@@ -106,12 +106,12 @@ const mainKeyboard = new Keyboard()
 bot.command('start', async (ctx) => {
   getUserData(ctx.chat.id);
   await ctx.reply(
-    '👋 Привет! Используй кнопки ниже для просмотра и настройки расписания:',
+    '👋 Привет! Используй меню ниже для быстрого доступа к расписанию:',
     { reply_markup: mainKeyboard }
   );
 });
 
-// --- ОБРАБОТКА НАЖАТИЙ НИЖНИХ КНОПОК ---
+// --- ОБРАБОТКА НАЖАТИЙ НИЖНИХ КНОПОК МЕНЮ ---
 
 bot.hears('📅 Сегодня', async (ctx) => {
   await ctx.reply(formatScheduleText(ctx.chat.id, new Date(), 'сегодня'), { parse_mode: 'Markdown' });
@@ -127,7 +127,8 @@ bot.hears('⚙️ Настроить расписание', async (ctx) => {
   ctx.session.step = null;
   const keyboard = new InlineKeyboard()
     .text('Четная неделя', 'week_even')
-    .text('Нечетная неделя', 'week_odd');
+    .text('Нечетная неделя', 'week_odd').row()
+    .text('❌ Закрыть', 'close_menu');
   
   await ctx.reply('⚙️ **Выбери тип недели для редактирования:**', {
     reply_markup: keyboard,
@@ -135,8 +136,9 @@ bot.hears('⚙️ Настроить расписание', async (ctx) => {
   });
 });
 
-// --- ИНЛАЙН НАВИГАЦИЯ И КНОПКИ РЕДАКТИРОВАНИЯ ---
+// --- ИНЛАЙН НАВИГАЦИЯ И КНОПКИ «НАЗАД» ---
 
+// Выбор недели
 bot.callbackQuery(/^week_(even|odd)$/, async (ctx) => {
   const week = ctx.match[1];
   ctx.session.week = week;
@@ -154,10 +156,12 @@ bot.callbackQuery(/^week_(even|odd)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
+// Возврат к выбору недели
 bot.callbackQuery('back_to_weeks', async (ctx) => {
   const keyboard = new InlineKeyboard()
     .text('Четная неделя', 'week_even')
-    .text('Нечетная неделя', 'week_odd');
+    .text('Нечетная неделя', 'week_odd').row()
+    .text('❌ Закрыть', 'close_menu');
 
   await ctx.editMessageText('⚙️ **Выбери тип недели:**', {
     reply_markup: keyboard,
@@ -166,6 +170,7 @@ bot.callbackQuery('back_to_weeks', async (ctx) => {
   await ctx.answerCallbackQuery();
 });
 
+// Выбор дня в конкретной неделе
 bot.callbackQuery(/^day_(\d)$/, async (ctx) => {
   const day = ctx.match[1];
   ctx.session.day = day;
@@ -185,21 +190,33 @@ bot.callbackQuery(/^day_(\d)$/, async (ctx) => {
     .text('➕ Добавить пару', 'add_pair').row()
     .text('🛠 Настроить работу', 'set_work').row()
     .text('🗑 Очистить день', 'clear_day').row()
-    .text('⬅️ Назад к дням', `week_${ctx.session.week}`);
+    .text('⬅️ Назад к выбору дня', `week_${ctx.session.week}`);
 
   await ctx.editMessageText(text, { reply_markup: keyboard, parse_mode: 'Markdown' });
   await ctx.answerCallbackQuery();
 });
 
+// Форма добавления пары с кнопкой отмены/назад
 bot.callbackQuery('add_pair', async (ctx) => {
   ctx.session.step = 'awaiting_pair';
-  await ctx.reply('Пришли пару в формате:\n`Время | Название | Аудитория`\n\nПример:\n`08:30-10:00 | Высшая математика | 304`', { parse_mode: 'Markdown' });
+  const keyboard = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+  
+  await ctx.reply('Пришли пару в формате:\n`Время | Название | Аудитория`\n\nПример:\n`08:30-10:00 | Высшая математика | 304`', {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard
+  });
   await ctx.answerCallbackQuery();
 });
 
+// Форма настройки работы с кнопкой отмены/назад
 bot.callbackQuery('set_work', async (ctx) => {
   ctx.session.step = 'awaiting_work';
-  await ctx.reply('Пришли смену в формате:\n`Время | Название`\n\nПример:\n`15:00-21:00 | Смена в мастерской`', { parse_mode: 'Markdown' });
+  const keyboard = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+
+  await ctx.reply('Пришли смену в формате:\n`Время | Название`\n\nПример:\n`15:00-21:00 | Смена в мастерской`', {
+    parse_mode: 'Markdown',
+    reply_markup: keyboard
+  });
   await ctx.answerCallbackQuery();
 });
 
@@ -209,7 +226,14 @@ bot.callbackQuery('clear_day', async (ctx) => {
     data[ctx.chat.id].schedule[ctx.session.week][ctx.session.day] = { pairs: [], work: null };
     saveData(data);
   }
-  await ctx.reply('✅ День очищен!');
+  
+  const keyboard = new InlineKeyboard().text('⬅️ Назад к дню', `day_${ctx.session.day}`);
+  await ctx.reply('✅ День очищен!', { reply_markup: keyboard });
+  await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery('close_menu', async (ctx) => {
+  await ctx.deleteMessage();
   await ctx.answerCallbackQuery();
 });
 
@@ -221,7 +245,11 @@ bot.on('message:text', async (ctx) => {
   if (ctx.session.step === 'awaiting_pair') {
     const parts = ctx.message.text.split('|').map(s => s.trim());
     if (parts.length < 3) {
-      return ctx.reply('⚠️ Неверный формат. Попробуй еще раз:\n`08:30-10:00 | Математика | 304`', { parse_mode: 'Markdown' });
+      const cancelKb = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+      return ctx.reply('⚠️ Неверный формат. Попробуй еще раз:\n`08:30-10:00 | Математика | 304`', {
+        parse_mode: 'Markdown',
+        reply_markup: cancelKb
+      });
     }
 
     const data = loadData();
@@ -234,12 +262,18 @@ bot.on('message:text', async (ctx) => {
 
     saveData(data);
     ctx.session.step = null;
-    await ctx.reply('✅ Пара добавлена!', { reply_markup: mainKeyboard });
+    
+    const navKb = new InlineKeyboard().text('⬅️ Вернуться в день', `day_${ctx.session.day}`);
+    await ctx.reply('✅ Пара добавлена!', { reply_markup: navKb });
   } 
   else if (ctx.session.step === 'awaiting_work') {
     const parts = ctx.message.text.split('|').map(s => s.trim());
     if (parts.length < 2) {
-      return ctx.reply('⚠️ Неверный формат. Попробуй еще раз:\n`15:00-21:00 | Смена`', { parse_mode: 'Markdown' });
+      const cancelKb = new InlineKeyboard().text('⬅️ Отмена / Назад', `day_${ctx.session.day}`);
+      return ctx.reply('⚠️ Неверный формат. Попробуй еще раз:\n`15:00-21:00 | Смена`', {
+        parse_mode: 'Markdown',
+        reply_markup: cancelKb
+      });
     }
 
     const data = loadData();
@@ -251,7 +285,9 @@ bot.on('message:text', async (ctx) => {
 
     saveData(data);
     ctx.session.step = null;
-    await ctx.reply('✅ Смена сохранена!', { reply_markup: mainKeyboard });
+    
+    const navKb = new InlineKeyboard().text('⬅️ Вернуться в день', `day_${ctx.session.day}`);
+    await ctx.reply('✅ Смена сохранена!', { reply_markup: navKb });
   }
 });
 
@@ -315,7 +351,7 @@ async function startBot() {
     await bot.api.deleteWebhook({ drop_pending_updates: true });
   } catch (e) {}
 
-  console.log('🤖 Бот запущен (управление только кнопками)!');
+  console.log('🤖 Бот запущен (управление только кнопками с полноценной навигацией назад)!');
   await bot.start();
 }
 
