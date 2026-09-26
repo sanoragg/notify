@@ -66,13 +66,10 @@ function formatISOToRU(isoDateStr) {
 
 // Определение четности недели (21.09.2026 - 27.09.2026 четная)
 function isEvenWeek(targetDate = getIrkutskDate()) {
-  // Базовый понедельник четной недели: 21.09.2026
-  const anchorDate = new Date(2026, 8, 21); // Month is 0-indexed (8 = September)
+  const anchorDate = new Date(2026, 8, 21); // 21.09.2026
   const diffTime = targetDate.getTime() - anchorDate.getTime();
   const diffDays = Math.floor(diffTime / (1000 * 3600 * 24));
   const diffWeeks = Math.floor(diffDays / 7);
-  
-  // Если разница в неделях четная — неделя четная
   return Math.abs(diffWeeks) % 2 === 0;
 }
 
@@ -117,38 +114,52 @@ bot.use(session({
   initial: () => ({ step: null, week: null, day: null, tempSubject: null, tempTime: null, dateStr: null })
 }));
 
-// --- Пробки и погода в Иркутске ---
+// --- КЭШИРОВАНИЕ И ПОЛУЧЕНИЕ ПОГОДЫ ---
+let weatherCache = {
+  data: null,
+  lastFetch: 0
+};
+
 async function getIrkutskConditions() {
   let trafficScore = 4;
   let weatherDelay = 0;
   let weatherDesc = "ясно";
 
-  try {
-    const res = await axios.get('https://api.open-meteo.com/v1/forecast?latitude=52.2978&longitude=104.2964&current_weather=true');
-    if (res.data && res.data.current_weather) {
-      const temp = res.data.current_weather.temperature;
-      const weatherCode = res.data.current_weather.weathercode;
-
-      if (temp < -20) {
-        weatherDelay += 10;
-        weatherDesc = `сильный мороз (${temp}°C)`;
-      } else if (temp < -10) {
-        weatherDelay += 5;
-        weatherDesc = `морозно (${temp}°C)`;
-      } else {
-        weatherDesc = `${temp}°C`;
+  const now = Date.now();
+  // Запрос обновляется не чаще одного раза в 30 минут
+  if (!weatherCache.data || (now - weatherCache.lastFetch) > 30 * 60 * 1000) {
+    try {
+      const res = await axios.get('https://api.open-meteo.com/v1/forecast?latitude=52.2978&longitude=104.2964&current_weather=true');
+      if (res.data && res.data.current_weather) {
+        weatherCache.data = res.data.current_weather;
+        weatherCache.lastFetch = now;
       }
-
-      if ([71, 73, 75, 85, 86].includes(weatherCode)) {
-        weatherDelay += 10;
-        weatherDesc += ", снегопад";
-      } else if ([61, 63, 65].includes(weatherCode)) {
-        weatherDelay += 5;
-        weatherDesc += ", дождь";
-      }
+    } catch (e) {
+      console.warn("Ошибка получения погоды:", e.message);
     }
-  } catch (e) {
-    console.warn("Ошибка получения погоды:", e.message);
+  }
+
+  if (weatherCache.data) {
+    const temp = weatherCache.data.temperature;
+    const weatherCode = weatherCache.data.weathercode;
+
+    if (temp < -20) {
+      weatherDelay += 10;
+      weatherDesc = `сильный мороз (${temp}°C)`;
+    } else if (temp < -10) {
+      weatherDelay += 5;
+      weatherDesc = `морозно (${temp}°C)`;
+    } else {
+      weatherDesc = `${temp}°C`;
+    }
+
+    if ([71, 73, 75, 85, 86].includes(weatherCode)) {
+      weatherDelay += 10;
+      weatherDesc += ", снегопад";
+    } else if ([61, 63, 65].includes(weatherCode)) {
+      weatherDelay += 5;
+      weatherDesc += ", дождь";
+    }
   }
 
   const hour = getIrkutskDate().getHours();
@@ -188,7 +199,7 @@ function formatMinutesToTime(totalMinutes) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
-// --- Построение СУХОГО отчёта ---
+// --- ПОСТРОЕНИЕ СУХОГО ОТЧЕТА ---
 async function buildDailyReport(chatId, targetDate = getIrkutskDate(), isMorning = false) {
   const userData = getUserData(chatId);
   const isoDateStr = targetDate.toISOString().split('T')[0];
@@ -489,7 +500,6 @@ bot.on('message:text', async (ctx) => {
 
 // --- КРОН-РАССЫЛКИ С УЧЕТОМ ЧАСОВОГО ПОЯСА ИРКУТСКА (UTC+8) ---
 
-// Вечерний отчет каждый день в 22:00 по Иркутску
 cron.schedule('0 22 * * *', async () => {
   const data = loadData();
   const tomorrow = getIrkutskDate();
@@ -507,7 +517,6 @@ cron.schedule('0 22 * * *', async () => {
   }
 }, { timezone: 'Asia/Irkutsk' });
 
-// Утреннее напоминание за 1 час до выхода по Иркутску
 cron.schedule('* * * * *', async () => {
   const data = loadData();
   const now = getIrkutskDate();
